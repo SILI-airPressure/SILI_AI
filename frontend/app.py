@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 from html import escape
 import json
 import os
@@ -24,6 +24,11 @@ ALERT_FIELDS_BY_TYPE = {
     "압력 유지 전력 낭비 의심": {"pressure", "current"},
     "유휴 설비 전력 낭비 의심": {"pressure", "current"},
 }
+KST = timezone(timedelta(hours=9), "KST")
+
+
+def kst_now():
+    return datetime.now(KST)
 
 
 # =========================
@@ -135,6 +140,15 @@ st.markdown(
         box-shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
     }
 
+    div[data-testid="column"]:has(.sensor-card-cause-marker),
+    div[data-testid="stColumn"]:has(.sensor-card-cause-marker) {
+        border-color: #ff605c !important;
+        background: rgba(255, 96, 92, 0.08) !important;
+        box-shadow:
+            inset 0 0 0 2px rgba(255, 96, 92, 0.55),
+            0 1px 3px rgba(255, 96, 92, 0.24);
+    }
+
     div[data-testid="column"]:has(.sensor-card-marker) div[data-testid="stVerticalBlockBorderWrapper"],
     div[data-testid="stColumn"]:has(.sensor-card-marker) div[data-testid="stVerticalBlockBorderWrapper"] {
         border: 0 !important;
@@ -143,7 +157,8 @@ st.markdown(
         margin-bottom: 0;
     }
 
-    .sensor-card-marker {
+    .sensor-card-marker,
+    .sensor-card-cause-marker {
         display: none;
     }
 
@@ -844,6 +859,50 @@ def active_anomaly_text(latest, active_fields):
     return ", ".join(f"{label} {score}%" for label, score in scored_items)
 
 
+def problem_cause_fields(latest, alerts, active_fields):
+    active_field_set = set(active_fields)
+    has_problem = (
+        int(latest.get("alert_level", 0)) > 0
+        or int(latest.get("alarm_level", 0)) > 0
+        or int(latest.get("anomaly_score", 0)) >= 100
+        or bool(alerts)
+    )
+    if not has_problem:
+        return set()
+
+    cause_fields = set()
+    for alert in alerts:
+        cause_fields.update(alert.get("fields") or ALERT_FIELDS_BY_TYPE.get(alert.get("type"), set()))
+
+    if latest.get("leak_alert"):
+        cause_fields.update({"pressure", "air_flow", "sound_db"})
+    if latest.get("idle_power_alert"):
+        cause_fields.update({"pressure", "current"})
+
+    pressure_score = int(latest.get("pressure_score", 0))
+    leak_score = int(latest.get("leak_score", 0))
+    idle_power_score = int(latest.get("idle_power_score", 0))
+    if pressure_score >= 100:
+        cause_fields.add("pressure")
+    if int(latest.get("current_score", 0)) >= 100:
+        cause_fields.add("current")
+    if int(latest.get("vibration_score", 0)) >= 100:
+        cause_fields.add("vibration")
+    if int(latest.get("temperature_score", 0)) >= 100:
+        cause_fields.add("temperature")
+    if leak_score >= 100:
+        cause_fields.update({"air_flow", "sound_db"})
+    if idle_power_score >= 100:
+        if pressure_score >= 100:
+            cause_fields.add("pressure")
+        elif "current" in active_field_set:
+            cause_fields.add("current")
+        elif "pressure" in active_field_set:
+            cause_fields.add("pressure")
+
+    return cause_fields & active_field_set
+
+
 def init_state():
     if "compressor_on" not in st.session_state:
         st.session_state.compressor_on = True
@@ -1046,8 +1105,10 @@ def summary_info_card_html(label, value):
     )
 
 
-def render_sensor_card_with_detection(field_key, label, value, unit, checked, equipment_key):
+def render_sensor_card_with_detection(field_key, label, value, unit, checked, equipment_key, is_cause=False):
     st.markdown('<span class="sensor-card-marker"></span>', unsafe_allow_html=True)
+    if is_cause:
+        st.markdown('<span class="sensor-card-cause-marker"></span>', unsafe_allow_html=True)
     header_label, toggle_col = st.columns([1, 0.22], gap="small", vertical_alignment="center")
     with header_label:
         st.markdown(f'<div class="status-label">{escape(str(label))}</div>', unsafe_allow_html=True)
@@ -1074,8 +1135,9 @@ def render_sensor_card_with_detection(field_key, label, value, unit, checked, eq
     return checked
 
 
-def render_sensor_cards_with_detection(sensor_cards, active_fields, equipment_id):
+def render_sensor_cards_with_detection(sensor_cards, active_fields, equipment_id, cause_fields=None):
     active_field_set = set(active_fields)
+    cause_field_set = set(cause_fields or [])
     selected_field_set = set()
     equipment_key = equipment_id or "default"
     st.markdown('<div class="summary-section"></div>', unsafe_allow_html=True)
@@ -1090,6 +1152,7 @@ def render_sensor_cards_with_detection(sensor_cards, active_fields, equipment_id
                     unit,
                     field_key in active_field_set,
                     equipment_key,
+                    field_key in cause_field_set,
                 )
                 if checked:
                     selected_field_set.add(field_key)
@@ -1269,7 +1332,7 @@ def build_live_values():
         "leak_sustain_count": 0,
         "idle_power_sustain_count": 0,
         "waste_detection_fields": DEFAULT_WASTE_DETECTION_FIELDS.copy(),
-        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "timestamp": kst_now().strftime("%H:%M:%S"),
     }
     latest = {
         "time_mode": "production",
@@ -1309,7 +1372,7 @@ def build_live_values():
         "leak_sustain_count": 0,
         "idle_power_sustain_count": 0,
         "waste_detection_fields": DEFAULT_WASTE_DETECTION_FIELDS.copy(),
-        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "timestamp": kst_now().strftime("%H:%M:%S"),
         **latest,
     }
     return active_state, df, latest, alerts, live_config
@@ -1558,6 +1621,7 @@ def render_summary_body():
         sensor_cards,
         active_detection_fields,
         selected_equipment.get("id") or st.session_state.selected_equipment_id,
+        problem_cause_fields(latest, alerts, active_detection_fields),
     )
     if server_available and selected_detection_fields != active_detection_fields:
         updated_snapshot = update_server_config(
@@ -1625,7 +1689,7 @@ def render_summary_body():
     st.markdown(f'<div class="panel-title">알림 및 점검 이력 · {alarm_text}</div>', unsafe_allow_html=True)
     render_alert_log(alerts, active_detection_fields)
 
-    server_time = latest.get("timestamp", datetime.now().strftime("%H:%M:%S"))
+    server_time = latest.get("timestamp", kst_now().strftime("%H:%M:%S"))
     st.caption(f"마지막 수신 시간: {server_time}")
 
 
@@ -1659,7 +1723,7 @@ def render_graph_body():
                     theme=None,
                 )
 
-    server_time = latest.get("timestamp", datetime.now().strftime("%H:%M:%S"))
+    server_time = latest.get("timestamp", kst_now().strftime("%H:%M:%S"))
     st.caption(f"마지막 수신 시간: {server_time}")
 
 
