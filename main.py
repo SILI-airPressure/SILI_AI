@@ -1,5 +1,5 @@
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 from math import sin
 from pathlib import Path
@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 app = FastAPI(title="Compressor Simulator API")
 
+KST = timezone(timedelta(hours=9), "KST")
 EQUIPMENT_STORE_PATH = Path(__file__).with_name("equipment_store.json")
 LEAK_BASELINE_MIN_SAMPLES = 20
 LEAK_BASELINE_MAX_SAMPLES = 120
@@ -44,6 +45,10 @@ ALERT_TYPE_FIELDS = {
 }
 
 WasteDetectionField = Literal["air_flow", "sound_db", "current", "pressure", "vibration", "temperature"]
+
+
+def kst_now():
+    return datetime.now(KST)
 
 
 class SimulatorConfig(BaseModel):
@@ -292,7 +297,7 @@ class Simulator:
 
         sample = {
             "time": self.sequence,
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "timestamp": kst_now().strftime("%H:%M:%S"),
             "time_mode": time_mode,
             "time_mode_reason": time_mode_reason,
             "usage_start_time": self.config.usage_start_time,
@@ -338,7 +343,7 @@ class Simulator:
         if leak_alert and self.leak_sustain_count == ALERT_SUSTAIN_COUNT:
             self.alert_events.appendleft(
                 {
-                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "timestamp": kst_now().strftime("%H:%M:%S"),
                     "type": "압축공기 누설 의심",
                     "priority": "높음",
                     "location": "압축공기 라인",
@@ -349,7 +354,7 @@ class Simulator:
         if idle_power_alert and self.idle_power_sustain_count == ALERT_SUSTAIN_COUNT:
             self.alert_events.appendleft(
                 {
-                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "timestamp": kst_now().strftime("%H:%M:%S"),
                     "type": "압력 유지 전력 낭비 의심",
                     "priority": "중간",
                     "location": "압력 유지 운전",
@@ -389,7 +394,7 @@ class Simulator:
         return "production" if reason == "working_hours" else "non_production"
 
     def _time_mode_reason_for_config(self, config):
-        now = datetime.now()
+        now = kst_now()
         current_minutes = now.hour * 60 + now.minute
         start_minutes = self._minutes_from_hhmm(config.usage_start_time, 8 * 60)
         end_minutes = self._minutes_from_hhmm(config.usage_end_time, 18 * 60)
